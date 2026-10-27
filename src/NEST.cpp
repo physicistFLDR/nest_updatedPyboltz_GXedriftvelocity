@@ -471,6 +471,16 @@ YieldResult NESTcalc::GetYieldGamma(double energy, double density,
   return YieldResultValidity(result, energy, Wq_eV);
 }
 
+static bool NEST_lowEBoxModel(const VDetector *det, double density,
+                              const std::vector<double> &ERYieldsParam) {
+  if (!ValidityTests::nearlyEqual(ATOM_NUM, 54.) || det->get_inGas() ||
+      density < 1. || det->get_T_Kelvin() < 161.40 || !det->get_OldW13eV())
+    return false;
+  for (size_t i = 0; i < ERYieldsParam.size() && i < 10; ++i)
+    if (ERYieldsParam[i] >= 0.) return false;
+  return true;
+}
+
 YieldResult NESTcalc::GetYieldERWeighted(
     double energy, double density, double dfield,
     const std::vector<double> &ERYieldsParam,
@@ -480,7 +490,28 @@ YieldResult NESTcalc::GetYieldERWeighted(
                                fdetector->get_OldW13eV());
   double Wq_eV = wvalue.Wq_eV;
 
-  YieldResult yieldsB = GetYieldBetaGR(energy, density, dfield, ERYieldsParam);
+  YieldResult yieldsB{};
+  double wBG = 1. / (1. + exp(-(energy - 15.) / 3.));
+  if (!NEST_lowEBoxModel(fdetector, density, ERYieldsParam)) wBG = 1.;
+  if (wBG < 0.001) {
+    yieldsB = GetYieldsAndQuanta(energy, density, dfield, NEST::beta,
+                                 default_betaMeansPara, default_NRYieldsParam);
+  } else if (wBG > 0.999) {
+    yieldsB = GetYieldBetaGR(energy, density, dfield, ERYieldsParam);
+  } else {
+    YieldResult yTI =
+        GetYieldsAndQuanta(energy, density, dfield, NEST::beta,
+                           default_betaMeansPara, default_NRYieldsParam);
+    YieldResult yBG = GetYieldBetaGR(energy, density, dfield, ERYieldsParam);
+    yieldsB.PhotonYield = (1. - wBG) * yTI.PhotonYield + wBG * yBG.PhotonYield;
+    yieldsB.ElectronYield =
+        (1. - wBG) * yTI.ElectronYield + wBG * yBG.ElectronYield;
+    yieldsB.ExcitonRatio =
+        (1. - wBG) * yTI.ExcitonRatio + wBG * yBG.ExcitonRatio;
+    yieldsB.Lindhard = 1.;
+    yieldsB.ElectricField = dfield;
+    yieldsB.DeltaT_Scint = -999.;
+  }
   YieldResult yieldsG = GetYieldGamma(energy, density, dfield);
   double weightG =
       EnergyParams[0] +
@@ -608,10 +639,55 @@ NESTresult NESTcalc::GetYieldERdEOdxBasis(
         yields.ElectricField = field;
         yields.DeltaT_Scint = -999;
         result.yields = yields;
-      } else
-        result.yields = GetYieldBetaGR(eStep, rho, field);
+      } else {
+        double wBG = 1. / (1. + exp(-(-eMin - 15.) / 3.));
+        if (!NEST_lowEBoxModel(fdetector, rho, default_ERYieldsParam)) wBG = 1.;
+        if (wBG < 0.001) {
+          result.yields =
+              GetYieldsAndQuanta(eStep, rho, field, NEST::beta,
+                                 default_betaMeansPara, default_NRYieldsParam);
+        } else if (wBG > 0.999) {
+          result.yields = GetYieldBetaGR(eStep, rho, field);
+        } else {
+          YieldResult yTI =
+              GetYieldsAndQuanta(eStep, rho, field, NEST::beta,
+                                 default_betaMeansPara, default_NRYieldsParam);
+          YieldResult yBG = GetYieldBetaGR(eStep, rho, field);
+          result.yields.PhotonYield =
+              (1. - wBG) * yTI.PhotonYield + wBG * yBG.PhotonYield;
+          result.yields.ElectronYield =
+              (1. - wBG) * yTI.ElectronYield + wBG * yBG.ElectronYield;
+          result.yields.ExcitonRatio =
+              (1. - wBG) * yTI.ExcitonRatio + wBG * yBG.ExcitonRatio;
+          result.yields.Lindhard = 1.;
+          result.yields.ElectricField = field;
+          result.yields.DeltaT_Scint = -999.;
+        }
+      }
     } else {
-      result.yields = GetYieldBetaGR(refEnergy, rho, field);
+      double wBG = 1. / (1. + exp(-(refEnergy - 15.) / 3.));
+      if (!NEST_lowEBoxModel(fdetector, rho, default_ERYieldsParam)) wBG = 1.;
+      if (wBG < 0.001) {
+        result.yields =
+            GetYieldsAndQuanta(refEnergy, rho, field, NEST::beta,
+                               default_betaMeansPara, default_NRYieldsParam);
+      } else if (wBG > 0.999) {
+        result.yields = GetYieldBetaGR(refEnergy, rho, field);
+      } else {
+        YieldResult yTI =
+            GetYieldsAndQuanta(refEnergy, rho, field, NEST::beta,
+                               default_betaMeansPara, default_NRYieldsParam);
+        YieldResult yBG = GetYieldBetaGR(refEnergy, rho, field);
+        result.yields.PhotonYield =
+            (1. - wBG) * yTI.PhotonYield + wBG * yBG.PhotonYield;
+        result.yields.ElectronYield =
+            (1. - wBG) * yTI.ElectronYield + wBG * yBG.ElectronYield;
+        result.yields.ExcitonRatio =
+            (1. - wBG) * yTI.ExcitonRatio + wBG * yBG.ExcitonRatio;
+        result.yields.Lindhard = 1.;
+        result.yields.ElectricField = field;
+        result.yields.DeltaT_Scint = -999.;
+      }
     }
     if (eMin < 0. && NRERWidthsParam[0] < 0.) {
       QuantaResult quanta{};
@@ -1067,7 +1143,7 @@ YieldResult NESTcalc::GetYieldsAndQuanta ( double keV, double rho, double def,
 INTERACTION_TYPE scatter, const vector<double> &betaMeansPara, const vector<double> &nuclMeansPara ) {//TI
   
   if ( betaMeansPara.size() != default_betaMeansPara.size() ) throw std::runtime_error("ERROR: You need the correct # of NPs.");
-  //betaMeansPara are {20.7, -3.2, 0.07, 0.09, -1.10, 0., 35., 1.8, 1., 1.44, 0.5, 0.840, 3.95, 3.13, 0.} (defaults 11/24/2025)
+  //betaMeansPara are {20.7, -3.2, 0.07, 0.09, -1.10, 0., 35., 1.8, 1., 1.44, 0.5, 0.840, 4.507, 3.13, 0.} (defaults 10/26/2026)
   NESTresult results{};
   YieldResult yields{}; results.yields = yields; QuantaResult quanta{}; results.quanta = quanta;
   
@@ -1077,10 +1153,13 @@ INTERACTION_TYPE scatter, const vector<double> &betaMeansPara, const vector<doub
   double Nq = ( 1000. * keV ) / Wq + betaMeansPara[4]; if ( Nq < 0. ) Nq = 0.;
   double keVEff = keV + ( betaMeansPara[5] - keV ) / pow ( ( 1. + pow ( betaMeansPara[6] / keV, betaMeansPara[7] ) ), betaMeansPara[8] );
   
-  double xiBase = betaMeansPara[9], xiExpo = betaMeansPara[10], xiOff = betaMeansPara[11];
+  double xiBase = betaMeansPara[9], xiOff = betaMeansPara[11];
+  double Lf = log10 ( fmin ( fmax ( def, 1.0 ), 1e4 ) );
+  double xiExpo = 0.740759 + Lf * ( -0.089592 + Lf * ( -0.012392 + Lf * 0.002337 ) );
+  double lambda_F = 1. / ( 0.691673 + Lf * ( -0.286500 + Lf * ( 0.098435 - Lf * 0.013211 ) ) );
   double xiTIB = xiBase * pow ( keVEff + xiOff, xiExpo );
   double escape = log ( betaMeansPara[12] + xiTIB ) / xiTIB;
-  yields.ExcitonRatio = ( aX - betaMeansPara[14] ) * erf ( keVEff / betaMeansPara[13] ) + betaMeansPara[14];
+  yields.ExcitonRatio = ( aX - betaMeansPara[14] ) * erf ( keVEff / lambda_F ) + betaMeansPara[14];
   if ( escape > 1. ) {
     Nq *= escape; escape = 1.;
   }
@@ -1263,11 +1342,31 @@ YieldResult NESTcalc::GetYields(INTERACTION_TYPE species, double energy,
       return GetYieldGamma(energy, density,
                            dfield);  // PE of the full gamma spectrum
       break;
-    default:  // beta, CH3T, 14C, the pp solar neutrino background, and
-              // Compton/PP spectra of fullGamma
-      return GetYieldBetaGR(energy, density, dfield, ERYieldsParam);
-      //return GetYieldsAndQuanta ( energy, density, dfield, NEST::beta, ERYieldsParam, NRYieldsParam );
-      break;
+    default: {  // beta, CH3T, 14C, the pp solar neutrino background, and
+                // Compton/PP spectra of fullGamma
+      double wBG = 1. / (1. + exp(-(energy - 15.) / 3.));
+      if (!NEST_lowEBoxModel(fdetector, density, ERYieldsParam)) wBG = 1.;
+      if (wBG < 0.001)
+        return GetYieldsAndQuanta(energy, density, dfield, NEST::beta,
+                                  default_betaMeansPara, NRYieldsParam);
+      if (wBG > 0.999)
+        return GetYieldBetaGR(energy, density, dfield, ERYieldsParam);
+      YieldResult yTI =
+          GetYieldsAndQuanta(energy, density, dfield, NEST::beta,
+                             default_betaMeansPara, NRYieldsParam);
+      YieldResult yBG = GetYieldBetaGR(energy, density, dfield, ERYieldsParam);
+      YieldResult blended{};
+      blended.PhotonYield =
+          (1. - wBG) * yTI.PhotonYield + wBG * yBG.PhotonYield;
+      blended.ElectronYield =
+          (1. - wBG) * yTI.ElectronYield + wBG * yBG.ElectronYield;
+      blended.ExcitonRatio =
+          (1. - wBG) * yTI.ExcitonRatio + wBG * yBG.ExcitonRatio;
+      blended.Lindhard = 1.;
+      blended.ElectricField = dfield;
+      blended.DeltaT_Scint = -999.;
+      return blended;
+    }
   }
 }
 
